@@ -132,6 +132,13 @@ class AlertTests(unittest.IsolatedAsyncioTestCase):
         self.classify.assert_not_awaited()
         self.send.assert_not_awaited()
 
+    async def test_target_user_own_image_is_skipped(self):
+        own_msg = self.message(sender="100000001")
+        self.assertFalse(self.s.eligible(own_msg))
+        self.assertEqual(await self.process(own_msg), "ineligible")
+        self.classify.assert_not_awaited()
+        self.send.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -73,12 +73,13 @@ class AlertService:
         self.db.close()
 
     def eligible(self, message: dict) -> bool:
-        if not isinstance(message, dict) or not self.enabled or not str(self.target_user_id or "").strip():
+        target = str(self.target_user_id or "").strip()
+        if not isinstance(message, dict) or not self.enabled or not target:
             return False
         group, sender = message_scope(message)
         account = str(message.get("account_id") or "")
         if (message.get("platform") != "qq" or group not in self.groups
-                or not account or not sender or sender == account
+                or not account or not sender or sender == account or sender == target
                 or message.get("is_notify") or message.get("is_command")
                 or not message.get("session_id") or not message.get("message_id")):
             return False
