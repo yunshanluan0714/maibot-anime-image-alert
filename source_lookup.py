@@ -169,6 +169,7 @@ class SourceFinder:
         self._sauce_lock = asyncio.Lock()
         self._sauce_next_at = 0.0
         self._serp_backoff_until = 0.0
+        self._inflight: dict[str, asyncio.Task[SourceInfo | None]] = {}
 
     def close(self) -> None:
         self.db.close()
@@ -422,6 +423,39 @@ class SourceFinder:
         if not raw or len(raw) > SEARCH_MAX_BYTES:
             return None
 
+        existing = self._inflight.get(image_hash)
+        if existing is not None:
+            return await asyncio.shield(existing)
+
+        task = asyncio.create_task(
+            self._find_uncached(
+                image_hash,
+                raw,
+                allow_anime_frame=allow_anime_frame,
+                allow_cosplay_search=allow_cosplay_search,
+                logger=logger,
+            )
+        )
+        self._inflight[image_hash] = task
+
+        def _cleanup(done: asyncio.Task[SourceInfo | None]) -> None:
+            if self._inflight.get(image_hash) is done:
+                self._inflight.pop(image_hash, None)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(_cleanup)
+        return await asyncio.shield(task)
+
+    async def _find_uncached(
+        self,
+        image_hash: str,
+        raw: bytes,
+        *,
+        allow_anime_frame: bool = False,
+        allow_cosplay_search: bool = False,
+        logger: Any = None,
+    ) -> SourceInfo | None:
         info: SourceInfo | None = None
         sauce_err = False
         had_sauce_chars = False

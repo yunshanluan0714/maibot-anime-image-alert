@@ -50,6 +50,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         cfg = Plugin.build_default_config()
         cfg["alert"]["groups"] = ["200000001", "200000002"]
         cfg["alert"]["target_user_id"] = "100000001"
+        cfg["alert"]["reply_grace_seconds"] = 0
         self.plugin.set_plugin_config(cfg)
         self.plugin._set_context(SimpleNamespace(
             paths=SimpleNamespace(data_dir=Path(self.directory.name)),
@@ -64,8 +65,12 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_defaults_and_native_webui_schema(self):
         defaults = Plugin.build_default_config()
+        self.assertEqual(defaults["plugin"]["config_version"], "1.4.0")
         self.assertEqual(defaults["alert"]["groups"], [])
         self.assertEqual(defaults["alert"]["target_user_id"], "")
+        self.assertEqual(defaults["alert"]["reply_grace_seconds"], 6)
+        self.assertTrue(defaults["alert"]["skip_when_replied_without_source"])
+        self.assertTrue(defaults["source"]["enable_planner_tool"])
         self.assertFalse(defaults["source"]["allow_temp_image_upload"])
         self.assertEqual(self.plugin.config.alert.groups, ["200000001", "200000002"])
         self.assertEqual(self.plugin.config.alert.target_user_id, "100000001")
@@ -168,6 +173,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         config = Plugin.build_default_config()
         config["alert"]["groups"] = ["200000001", "200000002"]
         config["alert"]["target_user_id"] = "123456789"
+        config["alert"]["reply_grace_seconds"] = 0
         self.plugin.set_plugin_config(config)
         await self.plugin.on_config_update("self", config, "updated")
         self.assertIs(self.plugin._service, original)
@@ -243,6 +249,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             cfg = Plugin.build_default_config()
             cfg["alert"]["groups"] = ["200000001", "200000002"]
             cfg["alert"]["target_user_id"] = "100000001"
+            cfg["alert"]["reply_grace_seconds"] = 0
             cfg["source"]["include_link"] = False
             cfg["source"]["saucenao_api_key"] = "SECRET_KEY"
             cfg["source"]["allow_temp_image_upload"] = True
@@ -300,6 +307,137 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.plugin._send_alert(message()))
         self.assertEqual(self.send.await_args.args[0][1]["type"], "at")
         self.assertEqual(self.send.await_args.args[0][-1]["data"], " 这张不错，喊你来看")
+
+    async def test_planner_before_request_injects_nudge_for_any_qq_group(self):
+        await self.plugin.observe_message(message=message(message_id="777", group="other-qq-group", image_hash="h777"))
+        items = [
+            {"item_type": "UserMessageItem", "parts": [{"type": "text", "text": '<message msg_id="777" user="u1" is_self_message="false">发张图'}]},
+            {"item_type": "UserMessageItem", "parts": [{"type": "text", "text": '<message msg_id="778" user="u2" is_self_message="false">这谁画的求出处'}]},
+            {"item_type": "UserMessageItem", "parts": [{"type": "text", "text": "<instruction>思考</instruction>"}]},
+        ]
+        result = await self.plugin.on_planner_before_request(
+            items=items,
+            tool_definitions=[{"function": {"name": "lookup_image_source"}}],
+        )
+        new_items = result["modified_kwargs"]["items"]
+        self.assertEqual(len(new_items), 4)
+        self.assertIn("lookup_image_source", new_items[2]["parts"][0]["text"])
+        self.assertIn("777", new_items[2]["parts"][0]["text"])
+
+    async def test_tool_lookup_image_source_and_planner_dedup_skip(self):
+        msg = message(message_id="888", image_hash="h888")
+        await self.plugin.observe_message(message=msg)
+        self.plugin._drain_queue()
+
+        found = SourceInfo(
+            engine="saucenao",
+            similarity=94.2,
+            work="zenless zone zero",
+            characters=["aria"],
+            artist="ohichi16",
+            url="https://www.pixiv.net/artworks/152247186",
+        )
+        with patch.object(self.plugin, "_lookup_source_by_hashes", AsyncMock(return_value=found)) as lookup, \
+             patch.object(plugin_module, "localize_names", AsyncMock(return_value=["爱芮"])):
+            res = await self.plugin.tool_lookup_image_source(msg_id="888")
+        lookup.assert_awaited_once_with(["h888"])
+        self.assertTrue(res["success"])
+        self.assertTrue(res["found"])
+        self.assertEqual(res["work"], "绝区零")
+        self.assertEqual(res["characters"], ["爱芮"])
+        self.assertIn("https://www.pixiv.net/artworks/152247186", res["content"])
+
+        await self.plugin.on_reply_before_post_process(
+            session_id="test-stream-not-a-real-group",
+            reply_message_id="888",
+            response="这是《绝区零》的爱芮，画师 ohichi16，原帖 https://www.pixiv.net/artworks/152247186",
+        )
+        self.assertEqual(await self.plugin._send_alert(msg), "skipped")
+        self.send.assert_not_awaited()
+
+        missing = await self.plugin.tool_lookup_image_source(msg_id="nonexistent")
+        self.assertTrue(missing["success"])
+        self.assertFalse(missing["found"])
+        with patch.object(self.plugin, "_lookup_source_by_hashes", AsyncMock(return_value=None)):
+            miss = await self.plugin.tool_lookup_image_source(msg_id="888")
+        self.assertTrue(miss["success"])
+        self.assertFalse(miss["found"])
+
+    async def test_alert_skips_when_replied_without_source_and_follows_up_with_source(self):
+        msg_a = message(message_id="901", image_hash="h901")
+        await self.plugin.observe_message(message=msg_a)
+        self.plugin._drain_queue()
+        await self.plugin.on_reply_before_post_process(
+            session_id="test-stream-not-a-real-group",
+            reply_message_id="901",
+            response="这张光影和眼神好戳我！",
+        )
+        with patch.object(self.plugin, "_lookup_source", AsyncMock(return_value=None)):
+            self.assertEqual(await self.plugin._send_alert(msg_a), "skipped")
+        self.send.assert_not_awaited()
+
+        msg_b = message(message_id="902", image_hash="h902")
+        await self.plugin.observe_message(message=msg_b)
+        self.plugin._drain_queue()
+        await self.plugin.on_reply_before_post_process(
+            session_id="test-stream-not-a-real-group",
+            reply_message_id="902",
+            response="这构图和配色也太绝了吧！",
+        )
+        found = SourceInfo(
+            engine="saucenao",
+            similarity=95.0,
+            work="zenless zone zero",
+            characters=["aria"],
+            artist="ohichi16",
+            url="https://www.pixiv.net/artworks/152247186",
+        )
+        with patch.object(self.plugin, "_lookup_source", AsyncMock(return_value=found)), \
+             patch.object(plugin_module, "localize_names", AsyncMock(return_value=["爱芮"])), \
+             patch.object(plugin_module, "compose_reminder", AsyncMock(return_value="对了顺手喊你来看，是绝区零的爱芮")) as compose:
+            self.assertTrue(await self.plugin._send_alert(msg_b))
+        compose.assert_awaited_once_with(
+            msg_b,
+            self.plugin.ctx,
+            logger=self.plugin.ctx.logger,
+            source={"work": "绝区零", "characters": ["爱芮"], "artist": "ohichi16"},
+            previous_bot_reply="这构图和配色也太绝了吧！",
+            mode="follow_up",
+        )
+        self.assertEqual(
+            self.send.await_args.args[0][2]["data"],
+            " 对了顺手喊你来看，是绝区零的爱芮\nhttps://www.pixiv.net/artworks/152247186",
+        )
+
+    async def test_reply_grace_period_waits_for_planner_reply(self):
+        cfg = Plugin.build_default_config()
+        cfg["alert"]["groups"] = ["200000001", "200000002"]
+        cfg["alert"]["target_user_id"] = "100000001"
+        cfg["alert"]["reply_grace_seconds"] = 2
+        self.plugin.set_plugin_config(cfg)
+        await self.plugin.on_config_update("self", cfg, "updated")
+
+        now = 1000.0
+        self.plugin._clock = lambda: now
+        msg = message(message_id="950", image_hash="h950")
+        msg["timestamp"] = str(now)
+        await self.plugin.observe_message(message=msg)
+        self.plugin._drain_queue()
+
+        async def fake_sleep(delay):
+            nonlocal now
+            now += delay
+            await self.plugin.on_reply_before_post_process(
+                session_id="test-stream-not-a-real-group",
+                reply_message_id="950",
+                response="刚看到，好好看！",
+            )
+
+        with patch.object(plugin_module.asyncio, "sleep", side_effect=fake_sleep) as slept, \
+             patch.object(self.plugin, "_lookup_source", AsyncMock(return_value=None)):
+            self.assertEqual(await self.plugin._send_alert(msg), "skipped")
+        slept.assert_awaited_once()
+        self.send.assert_not_awaited()
 
 
 if __name__ == "__main__":

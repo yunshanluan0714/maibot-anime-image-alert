@@ -9,7 +9,7 @@ class PluginSection(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="启用提醒；修改后立即停止排队任务的新发送")
-    config_version: str = Field(default="1.3.0", description="配置版本")
+    config_version: str = Field(default="1.4.0", description="配置版本")
 
 
 class AlertSection(PluginConfigBase):
@@ -28,6 +28,16 @@ class AlertSection(PluginConfigBase):
     )
     cooldown_seconds: int = Field(default=0, ge=0, le=86400, description="每群提醒最短间隔，0 表示无冷却，单位秒")
     hourly_limit: int = Field(default=0, ge=0, le=100, description="每群滚动一小时最多提醒次数，0 表示不限制")
+    skip_when_replied_without_source: bool = Field(
+        default=True,
+        description="主脑已经回复过该图片且未查到新出处时，静默跳过独立 @ 提醒，避免机械复读",
+    )
+    reply_grace_seconds: int = Field(
+        default=6,
+        ge=0,
+        le=30,
+        description="发出独立提醒前等待主脑首轮回复的最短观察窗口（秒），避免与主脑回复撞车",
+    )
 
 
 class SourceSection(PluginConfigBase):
@@ -36,6 +46,10 @@ class SourceSection(PluginConfigBase):
     __ui_order__ = 2
 
     enabled: bool = Field(default=True, description="命中美图后用 SauceNAO / Google Lens / IQDB（截图兜底 trace.moe）查找作品、角色、画师与原帖链接")
+    enable_planner_tool: bool = Field(
+        default=True,
+        description="向主脑暴露 lookup_image_source 以图搜图工具，群友问出处时直接搜图回答",
+    )
     include_link: bool = Field(default=True, description="命中出处后在提醒正文下一行直接附带原帖链接（Pixiv / X 优先，其次 Danbooru）")
     localize_names: bool = Field(default=True, description="用模型把角色英文名翻成通行中文译名；不确定时保留原名")
     saucenao_api_key: str = Field(default="", description="可选。填写后走 SauceNAO JSON 接口，额度更高；留空使用公开网页（自动限速）")

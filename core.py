@@ -146,11 +146,15 @@ class AlertService:
                 self.db.execute("INSERT INTO sends VALUES (?,?,?,?)", (key, group, now, "pending"))
             # Reservation precedes outbound I/O: an ambiguous send must never be retried automatically.
             try:
-                success = await send(message)
+                outcome = await send(message)
             except Exception:
                 status = "unknown"
             else:
-                status = "sent" if success is True else "failed"
+                if outcome == "skipped":
+                    with self.db:
+                        self.db.execute("DELETE FROM sends WHERE key=?", (key,))
+                    return "skipped"
+                status = "sent" if outcome is True else "failed"
             with self.db:
                 self.db.execute("UPDATE sends SET status=? WHERE key=?", (status, key))
             return status

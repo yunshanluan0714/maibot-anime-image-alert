@@ -139,6 +139,15 @@ class AlertTests(unittest.IsolatedAsyncioTestCase):
         self.classify.assert_not_awaited()
         self.send.assert_not_awaited()
 
+    async def test_skipped_send_frees_quota_reservation_but_keeps_seen_dedup(self):
+        self.send.return_value = "skipped"
+        self.assertEqual(await self.process(self.message("1", "abc")), "skipped")
+        self.assertEqual(self.s.db.execute("SELECT COUNT(*) FROM sends").fetchone()[0], 0)
+        # Same image remains deduplicated across 24h, while a new image is not blocked by cooldown.
+        self.assertEqual(await self.process(self.message("2", "abc")), "duplicate")
+        self.send.return_value = True
+        self.assertEqual(await self.process(self.message("3", "def")), "sent")
+
 
 if __name__ == "__main__":
     unittest.main()

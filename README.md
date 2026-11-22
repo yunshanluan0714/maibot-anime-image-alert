@@ -10,7 +10,9 @@
   - 默认支持 SauceNAO、IQDB 与 Danbooru 标签补全（动画截图场景按需触发 `trace.moe`），命中结果本地 SQLite 持久化缓存（命中缓存 7 天、未命中缓存 24 小时）。
   - 可选支持 SerpApi（Google Lens / Bing 反向搜图），默认关闭第三方临时图床上传，需用户显式开启（见下方隐私说明）。
   - 可选自动将角色英文/罗马音标签翻译为通行中文译名，并在提醒文案中自然点出已核实的作品与角色信息，次行附带原帖链接。
-- **防刷屏与重启持久化**：内置跨群 24 小时图片去重、每群可选冷却时间与每小时提醒上限，全部持久化在本地 SQLite 中；支持 WebUI 热更新并即时取消排队中的旧任务。
+- **主脑接入原生以图搜图工具（1.4.0 新增）**：向主脑暴露可见工具 `lookup_image_source(msg_id, index=0)`，并通过 `maisaka.planner.before_request` 在群友问出处/画师/角色/求原图时提示主脑先查后答，避免“先说不知道、随后插件又发链接”的割裂感。
+- **上下文感知智能衔接（1.4.0 新增）**：通过 `maisaka.reply.before_post_process` 观察主脑首轮回复并等待可配置的宽限窗口（默认 6 秒）：若主脑已搜图并回复或已发出处链接则静默跳过；若主脑已夸过且未查到新出处则不再机械复读；若主脑已夸过但后台查到了新出处，则切为自然衔接语气顺口补一句“对了/顺便喊你来看……”并附原帖链接，不重复画面赞美。
+- **防刷屏与重启持久化**：内置跨群 24 小时图片去重、同图并发搜图去重、每群可选冷却时间与每小时提醒上限，全部持久化在本地 SQLite 中；支持 WebUI 热更新并即时取消排队中的旧任务。
 - **默认待命零打扰**：首次安装时 `alert.groups` 与 `alert.target_user_id` 默认为空，未配置前不会对任何群执行识别或发送提醒。
 
 ## 运行环境
@@ -35,7 +37,10 @@
 | `alert` | `target_user_id` | `""` | 接收原生 `@` 提醒的 QQ 号；留空不生效 |
 | `alert` | `cooldown_seconds` | `0` | 单群两次提醒最短间隔（秒），0 表示不限 |
 | `alert` | `hourly_limit` | `0` | 单群滚动一小时内最多提醒次数，0 表示不限 |
+| `alert` | `skip_when_replied_without_source` | `true` | 主脑已经回复过该图片且未查到新出处时，静默跳过独立 `@` 提醒，避免机械复读 |
+| `alert` | `reply_grace_seconds` | `6` | 发出独立提醒前等待主脑首轮回复的最短观察窗口（秒），避免撞车 |
 | `source` | `enabled` | `true` | 是否启用以图搜图查找作品、角色与原帖出处 |
+| `source` | `enable_planner_tool` | `true` | 是否向主脑暴露 `lookup_image_source` 工具并注入问出处搜图提示 |
 | `source` | `include_link` | `true` | 命中出处后是否在正文下一行附带原帖链接 |
 | `source` | `localize_names` | `true` | 是否将角色英文标签翻译为通行中文译名 |
 | `source` | `saucenao_api_key` | `""` | 可选，填写后使用 SauceNAO JSON API（额度更高） |
@@ -55,7 +60,7 @@
 
 本插件仅声明并调用以下 4 项宿主能力：
 
-- `database.get`：只读查询宿主 `Images` 表中已完成 VLM 识别的图片描述与本地路径
+- `database.get`：只读查询宿主 `Images` / `Messages` 表中的图片哈希、VLM 描述与本地路径
 - `config.get`：只读获取机器人当前人设配置，用于生成贴合人设的简短提醒话术
 - `llm.generate`：调用 `fast_model` 进行结构化筛选与角色译名，调用 `replyer` 生成简短提醒正文
 - `send.hybrid`：在白名单原群内以原生引用 + 原生 `@` 发送单行提醒文本

@@ -564,6 +564,44 @@ class FinderTests(unittest.IsolatedAsyncioTestCase):
         finally:
             finder.close()
 
+    def test_concurrent_find_deduplicates_inflight_requests(self):
+        import asyncio
+        import threading
+
+        calls = 0
+        lock = threading.Lock()
+
+        def fake_http(url, *, data=None, headers=None, timeout=20.0, proxy_url=""):
+            del data, headers, timeout, proxy_url
+            nonlocal calls
+            if "saucenao.com" in url:
+                with lock:
+                    calls += 1
+                time.sleep(0.05)
+                return SAUCE_HTML_PIXIV.encode("utf-8")
+            raise AssertionError(f"unexpected call: {url}")
+
+        finder = sl.SourceFinder(
+            self.temp.name,
+            http=fake_http,
+            saucenao_min_interval=0.0,
+        )
+
+        async def run_both():
+            return await asyncio.gather(
+                finder.find("same-hash", b"img"),
+                finder.find("same-hash", b"img"),
+            )
+
+        try:
+            a, b = asyncio.run(run_both())
+            self.assertIsNotNone(a)
+            self.assertIsNotNone(b)
+            self.assertEqual(a.url, b.url)
+            self.assertEqual(calls, 1)
+        finally:
+            finder.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -282,6 +282,32 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(wording.ensure_source_mention("来看", {"work": "原创", "characters": []}), "来看")
         self.assertEqual(wording.ensure_source_mention("来看", {"artist": "abc"}), "画师 abc 的图～来看")
 
+    async def test_follow_up_mode_includes_previous_reply_and_dedicated_fallback(self):
+        ctx = context(response="对了顺手喊你来看，是绝区零的爱芮")
+        out = await wording.compose_reminder(
+            message("abc"),
+            ctx,
+            source={"work": "绝区零", "characters": ["爱芮"]},
+            previous_bot_reply="这张蓝色光影真的好漂亮！",
+            mode="follow_up",
+        )
+        self.assertEqual(out, "对了顺手喊你来看，是绝区零的爱芮")
+        prompt = ctx.llm.generate.call_args.kwargs["prompt"]
+        self.assertIn("previous_bot_reply", prompt[0]["content"])
+        payload = json.loads(prompt[1]["content"])
+        self.assertEqual(payload["previous_bot_reply"], "这张蓝色光影真的好漂亮！")
+        self.assertEqual(payload["verified_source"], {"work": "绝区零", "characters": ["爱芮"]})
+
+        ctx_bad = context(response="<bad>")
+        fallback_out = await wording.compose_reminder(
+            message("abc"),
+            ctx_bad,
+            source={"work": "绝区零", "characters": ["爱芮"]},
+            previous_bot_reply="刚才已经夸过了",
+            mode="follow_up",
+        )
+        self.assertEqual(fallback_out, "《绝区零》的爱芮～" + wording.FOLLOW_UP_FALLBACK)
+
 
 class LocalizeNamesTests(unittest.IsolatedAsyncioTestCase):
     async def test_localize_plain_and_fenced_json(self):
