@@ -48,8 +48,6 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.send = AsyncMock(return_value={"sent": True, "message_id": "mock-sent-id"})
         self.plugin = Plugin()
         cfg = Plugin.build_default_config()
-        cfg["alert"]["groups"] = ["200000001", "200000002"]
-        cfg["alert"]["target_user_id"] = "100000001"
         cfg["alert"]["reply_grace_seconds"] = 0
         self.plugin.set_plugin_config(cfg)
         self.plugin._set_context(SimpleNamespace(
@@ -66,12 +64,9 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_defaults_and_native_webui_schema(self):
         defaults = Plugin.build_default_config()
         self.assertEqual(defaults["plugin"]["config_version"], "1.4.0")
-        self.assertEqual(defaults["alert"]["groups"], [])
-        self.assertEqual(defaults["alert"]["target_user_id"], "")
         self.assertEqual(defaults["alert"]["reply_grace_seconds"], 6)
         self.assertTrue(defaults["alert"]["skip_when_replied_without_source"])
         self.assertTrue(defaults["source"]["enable_planner_tool"])
-        self.assertFalse(defaults["source"]["allow_temp_image_upload"])
         self.assertEqual(self.plugin.config.alert.groups, ["200000001", "200000002"])
         self.assertEqual(self.plugin.config.alert.target_user_id, "100000001")
         self.assertEqual(self.plugin.config.alert.cooldown_seconds, 0)
@@ -79,7 +74,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.plugin.config.source.enabled)
         self.assertTrue(self.plugin.config.source.include_link)
         self.assertTrue(self.plugin.config.source.localize_names)
-        schema = Plugin.build_config_schema(plugin_id="github.yunshanluan0714.anime-image-alert")
+        schema = Plugin.build_config_schema(plugin_id="local.anime-image-alert")
         self.assertTrue(schema["sections"])
         self.assertIn("source", schema["sections"])
         self.assertEqual(Plugin.config_reload_subscriptions, ())
@@ -171,7 +166,6 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_hot_target_change_uses_new_native_at(self):
         original = self.plugin._service
         config = Plugin.build_default_config()
-        config["alert"]["groups"] = ["200000001", "200000002"]
         config["alert"]["target_user_id"] = "123456789"
         config["alert"]["reply_grace_seconds"] = 0
         self.plugin.set_plugin_config(config)
@@ -247,18 +241,14 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
             # Respect include_link=False on config hot update.
             cfg = Plugin.build_default_config()
-            cfg["alert"]["groups"] = ["200000001", "200000002"]
-            cfg["alert"]["target_user_id"] = "100000001"
             cfg["alert"]["reply_grace_seconds"] = 0
             cfg["source"]["include_link"] = False
             cfg["source"]["saucenao_api_key"] = "SECRET_KEY"
-            cfg["source"]["allow_temp_image_upload"] = True
             cfg["source"]["min_similarity"] = 88.0
             cfg["source"]["timeout_seconds"] = 18
             self.plugin.set_plugin_config(cfg)
             await self.plugin.on_config_update("self", cfg, "updated")
             self.assertEqual(self.plugin._finder.saucenao_api_key, "SECRET_KEY")
-            self.assertTrue(self.plugin._finder.allow_temp_image_upload)
             self.assertEqual(self.plugin._finder.min_similarity, 88.0)
             self.assertEqual(self.plugin._finder.timeout_seconds, 18.0)
 
@@ -288,6 +278,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                     self.plugin.ctx,
                     logger=self.plugin.ctx.logger,
                     source={"work": "绝区零", "characters": ["爱芮", "南宫羽"], "artist": "ohichi16"},
+                    recent_reminders=["妄想天使这张绝了，快来瞅瞅", "妄想天使这张绝了，快来瞅瞅"],
                 )
                 self.assertEqual(
                     self.send.await_args.args[0][2]["data"],
@@ -306,7 +297,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         # A context with no image database simulates a failed wording backend.
         self.assertTrue(await self.plugin._send_alert(message()))
         self.assertEqual(self.send.await_args.args[0][1]["type"], "at")
-        self.assertEqual(self.send.await_args.args[0][-1]["data"], " 这张不错，喊你来看")
+        self.assertIn(self.send.await_args.args[0][-1]["data"], {" " + item for item in plugin_module.compose_reminder.__globals__["FALLBACK_POOL"]})
 
     async def test_planner_before_request_injects_nudge_for_any_qq_group(self):
         await self.plugin.observe_message(message=message(message_id="777", group="other-qq-group", image_hash="h777"))
@@ -355,6 +346,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.plugin._send_alert(msg), "skipped")
         self.send.assert_not_awaited()
 
+        # Unknown msg_id and empty lookup miss both fail gracefully.
         missing = await self.plugin.tool_lookup_image_source(msg_id="nonexistent")
         self.assertTrue(missing["success"])
         self.assertFalse(missing["found"])
@@ -364,6 +356,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(miss["found"])
 
     async def test_alert_skips_when_replied_without_source_and_follows_up_with_source(self):
+        # Case A: Planner praised the image, reverse search found nothing -> skip quietly.
         msg_a = message(message_id="901", image_hash="h901")
         await self.plugin.observe_message(message=msg_a)
         self.plugin._drain_queue()
@@ -376,6 +369,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.plugin._send_alert(msg_a), "skipped")
         self.send.assert_not_awaited()
 
+        # Case B: Planner praised the image, reverse search found source -> natural follow-up without repeat praise.
         msg_b = message(message_id="902", image_hash="h902")
         await self.plugin.observe_message(message=msg_b)
         self.plugin._drain_queue()
@@ -411,8 +405,6 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reply_grace_period_waits_for_planner_reply(self):
         cfg = Plugin.build_default_config()
-        cfg["alert"]["groups"] = ["200000001", "200000002"]
-        cfg["alert"]["target_user_id"] = "100000001"
         cfg["alert"]["reply_grace_seconds"] = 2
         self.plugin.set_plugin_config(cfg)
         await self.plugin.on_config_update("self", cfg, "updated")
@@ -438,6 +430,27 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.plugin._send_alert(msg), "skipped")
         slept.assert_awaited_once()
         self.send.assert_not_awaited()
+
+
+
+    async def test_consecutive_alerts_pass_recent_wordings_per_stream(self):
+        with patch.object(
+            plugin_module,
+            "compose_reminder",
+            AsyncMock(side_effect=["第一句文案", "第二句文案", "另一群文案"]),
+        ) as compose:
+            msg1 = message(group="200000001", message_id="m1", image_hash="h1")
+            msg2 = message(group="200000001", message_id="m2", image_hash="h2")
+            msg3 = message(group="200000002", message_id="m3", image_hash="h3")
+            msg3["session_id"] = "other-stream-id"
+            self.assertTrue(await self.plugin._send_alert(msg1))
+            self.assertTrue(await self.plugin._send_alert(msg2))
+            self.assertTrue(await self.plugin._send_alert(msg3))
+
+        self.assertEqual(compose.await_count, 3)
+        self.assertNotIn("recent_reminders", compose.await_args_list[0].kwargs)
+        self.assertEqual(compose.await_args_list[1].kwargs["recent_reminders"], ["第一句文案"])
+        self.assertNotIn("recent_reminders", compose.await_args_list[2].kwargs)
 
 
 if __name__ == "__main__":

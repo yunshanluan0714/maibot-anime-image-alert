@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import time
 from typing import Any
 
@@ -40,6 +41,7 @@ class AnimeImageAlertPlugin(MaiBotPlugin):
         self._worker: asyncio.Task[None] | None = None
         self._clock = time.time
         self._tracker = InteractionTracker(clock=lambda: self._clock())
+        self._recent_wordings: dict[str, deque[str]] = {}
         self._running = False
 
     async def on_load(self) -> None:
@@ -53,6 +55,7 @@ class AnimeImageAlertPlugin(MaiBotPlugin):
         )
         self._finder = SourceFinder(self.ctx.paths.data_dir)
         self._tracker = InteractionTracker(clock=lambda: self._clock())
+        self._recent_wordings = {}
         self._apply_config()
         self._running = True
         self._worker = asyncio.create_task(self._run_queue(), name="anime-image-alert-worker")
@@ -480,6 +483,8 @@ class AnimeImageAlertPlugin(MaiBotPlugin):
             memory_note = format_source_line(source, include_link=False, zh_characters=deduped_chars or None)
             self.ctx.logger.info("二次元图片出处: engine=%s sim=%.1f %s", source.engine, source.similarity, source_summary)
 
+        recent_wordings = list(self._recent_wordings.get(stream_id, ()))
+        extra_kwargs: dict[str, Any] = {"recent_reminders": recent_wordings} if recent_wordings else {}
         if decision == "send_follow_up":
             wording = await compose_reminder(
                 message,
@@ -488,11 +493,12 @@ class AnimeImageAlertPlugin(MaiBotPlugin):
                 source=source_payload,
                 previous_bot_reply=state.bot_reply_text,
                 mode="follow_up",
+                **extra_kwargs,
             )
         elif source_payload is None:
-            wording = await compose_reminder(message, self.ctx, logger=self.ctx.logger)
+            wording = await compose_reminder(message, self.ctx, logger=self.ctx.logger, **extra_kwargs)
         else:
-            wording = await compose_reminder(message, self.ctx, logger=self.ctx.logger, source=source_payload)
+            wording = await compose_reminder(message, self.ctx, logger=self.ctx.logger, source=source_payload, **extra_kwargs)
 
         # Wording may await a model; a disabled, expired, or newly replied alert must not send blindly.
         if not self._running or self._service is None or not self._service.eligible(message):
@@ -530,7 +536,10 @@ class AnimeImageAlertPlugin(MaiBotPlugin):
             processed_plain_text=f"[二次元图片提醒] {wording}" + (f"（{memory_note}）" if memory_note else ""),
             show_log=False,
         )
-        return isinstance(result, dict) and result.get("sent") is True
+        sent = isinstance(result, dict) and result.get("sent") is True
+        if sent and wording:
+            self._recent_wordings.setdefault(stream_id, deque(maxlen=8)).append(wording)
+        return sent
 
 
 def create_plugin() -> AnimeImageAlertPlugin:

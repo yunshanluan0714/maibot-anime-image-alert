@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.yunshanluan0714.anime-image-alert",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "plugin_type": "media",
   "name": "二次元/COS图片提醒",
   "description": "向主脑暴露以图搜图出处工具并联动白名单群美图提醒：群友问出处时先搜图再答，主脑已回复时智能跳过或顺口衔接补出处，并在未覆盖时以原生 @ 和引用提醒指定用户。",
@@ -22,7 +22,7 @@
   },
   "sdk": {
     "min_version": "2.20.0",
-    "max_version": "2.30.99"
+    "max_version": "2.99.99"
   },
   "dependencies": [],
   "capabilities": [
