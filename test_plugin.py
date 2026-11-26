@@ -48,7 +48,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.send = AsyncMock(return_value={"sent": True, "message_id": "mock-sent-id"})
         self.plugin = Plugin()
         cfg = Plugin.build_default_config()
-        cfg["alert"]["reply_grace_seconds"] = 0
+        cfg["alert"].update(groups=["200000001", "200000002"], target_user_id="100000001", reply_grace_seconds=0)
         self.plugin.set_plugin_config(cfg)
         self.plugin._set_context(SimpleNamespace(
             paths=SimpleNamespace(data_dir=Path(self.directory.name)),
@@ -67,8 +67,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(defaults["alert"]["reply_grace_seconds"], 6)
         self.assertTrue(defaults["alert"]["skip_when_replied_without_source"])
         self.assertTrue(defaults["source"]["enable_planner_tool"])
-        self.assertEqual(self.plugin.config.alert.groups, ["200000001", "200000002"])
-        self.assertEqual(self.plugin.config.alert.target_user_id, "100000001")
+        self.assertEqual(defaults["alert"]["groups"], [])
+        self.assertEqual(defaults["alert"]["target_user_id"], "")
         self.assertEqual(self.plugin.config.alert.cooldown_seconds, 0)
         self.assertEqual(self.plugin.config.alert.hourly_limit, 0)
         self.assertTrue(self.plugin.config.source.enabled)
@@ -166,6 +166,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_hot_target_change_uses_new_native_at(self):
         original = self.plugin._service
         config = Plugin.build_default_config()
+        config["alert"]["groups"] = ["200000001"]
         config["alert"]["target_user_id"] = "123456789"
         config["alert"]["reply_grace_seconds"] = 0
         self.plugin.set_plugin_config(config)
@@ -241,7 +242,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
             # Respect include_link=False on config hot update.
             cfg = Plugin.build_default_config()
-            cfg["alert"]["reply_grace_seconds"] = 0
+            cfg["alert"].update(groups=["200000001", "200000002"], target_user_id="100000001", reply_grace_seconds=0)
             cfg["source"]["include_link"] = False
             cfg["source"]["saucenao_api_key"] = "SECRET_KEY"
             cfg["source"]["min_similarity"] = 88.0
@@ -307,13 +308,33 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             {"item_type": "UserMessageItem", "parts": [{"type": "text", "text": "<instruction>思考</instruction>"}]},
         ]
         result = await self.plugin.on_planner_before_request(
-            items=items,
+            session_id="test-stream-not-a-real-group", items=items,
             tool_definitions=[{"function": {"name": "lookup_image_source"}}],
         )
         new_items = result["modified_kwargs"]["items"]
         self.assertEqual(len(new_items), 4)
         self.assertIn("lookup_image_source", new_items[2]["parts"][0]["text"])
         self.assertIn("777", new_items[2]["parts"][0]["text"])
+
+    async def test_lookup_requires_matching_host_session(self):
+        await self.plugin.observe_message(message=message(message_id="888"))
+        with patch.object(self.plugin, "_lookup_source_by_hashes", AsyncMock()) as lookup:
+            missing = await self.plugin.tool_lookup_image_source(msg_id="888")
+            other = await self.plugin.tool_lookup_image_source(msg_id="888", stream_id="other-stream")
+            self.assertFalse(missing["success"])
+            self.assertFalse(other["found"])
+            lookup.assert_not_awaited()
+
+    async def test_db_lookup_verifies_original_session(self):
+        import msgpack
+
+        filters = {"platform": "qq", "session_id": "current", "message_id": "older"}
+        row = dict(filters, raw_content=msgpack.packb([{"type": "image", "hash": "image-a"}]))
+        get = AsyncMock(side_effect=[row, dict(row, session_id="other")])
+        self.plugin.ctx.db = SimpleNamespace(get=get)
+        self.assertEqual(await self.plugin._resolve_hashes_for_msg_id("current", "older"), ["image-a"])
+        get.assert_awaited_once_with("Messages", filters=filters, single_result=True)
+        self.assertEqual(await self.plugin._resolve_hashes_for_msg_id("current", "older"), [])
 
     async def test_tool_lookup_image_source_and_planner_dedup_skip(self):
         msg = message(message_id="888", image_hash="h888")
@@ -330,7 +351,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(self.plugin, "_lookup_source_by_hashes", AsyncMock(return_value=found)) as lookup, \
              patch.object(plugin_module, "localize_names", AsyncMock(return_value=["爱芮"])):
-            res = await self.plugin.tool_lookup_image_source(msg_id="888")
+            res = await self.plugin.tool_lookup_image_source(stream_id="test-stream-not-a-real-group", msg_id="888")
         lookup.assert_awaited_once_with(["h888"])
         self.assertTrue(res["success"])
         self.assertTrue(res["found"])
@@ -347,11 +368,11 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.send.assert_not_awaited()
 
         # Unknown msg_id and empty lookup miss both fail gracefully.
-        missing = await self.plugin.tool_lookup_image_source(msg_id="nonexistent")
+        missing = await self.plugin.tool_lookup_image_source(stream_id="test-stream-not-a-real-group", msg_id="nonexistent")
         self.assertTrue(missing["success"])
         self.assertFalse(missing["found"])
         with patch.object(self.plugin, "_lookup_source_by_hashes", AsyncMock(return_value=None)):
-            miss = await self.plugin.tool_lookup_image_source(msg_id="888")
+            miss = await self.plugin.tool_lookup_image_source(stream_id="test-stream-not-a-real-group", msg_id="888")
         self.assertTrue(miss["success"])
         self.assertFalse(miss["found"])
 
@@ -405,7 +426,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reply_grace_period_waits_for_planner_reply(self):
         cfg = Plugin.build_default_config()
-        cfg["alert"]["reply_grace_seconds"] = 2
+        cfg["alert"].update(groups=["200000001"], target_user_id="100000001", reply_grace_seconds=2)
         self.plugin.set_plugin_config(cfg)
         await self.plugin.on_config_update("self", cfg, "updated")
 

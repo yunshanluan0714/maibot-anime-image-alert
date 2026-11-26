@@ -102,8 +102,10 @@ class AlertService:
     def _limited(self, group, now):
         if self.cooldown_seconds == 0 and self.hourly_limit == 0:
             return False
-        row = self.db.execute("SELECT MAX(created), COUNT(*) FROM sends WHERE group_id=? AND created>?",
-                              (group, now - 3600)).fetchone()
+        row = self.db.execute(
+            "SELECT MAX(created), COUNT(CASE WHEN created > ? THEN 1 END) FROM sends WHERE group_id=?",
+            (now - 3600, group),
+        ).fetchone()
         return ((row[0] is not None and now - row[0] < self.cooldown_seconds)
                 or (self.hourly_limit > 0 and row[1] >= self.hourly_limit))
 

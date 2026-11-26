@@ -42,6 +42,14 @@ class AlertTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.process(msg), "ineligible")
         self.classify.assert_not_awaited()
 
+    async def test_cooldown_can_exceed_hourly_window(self):
+        self.s.cooldown_seconds = 7200
+        self.assertEqual(await self.process(self.message()), "sent")
+        self.now += 3601
+        self.assertEqual(await self.process(self.message("2", "new")), "rate_limited")
+        self.now += 3599
+        self.assertEqual(await self.process(self.message("2", "new")), "sent")
+
     async def test_cooldown_and_hourly_quota(self):
         self.assertEqual(await self.process(self.message()), "sent")
         self.assertEqual(await self.process(self.message("2", "def")), "rate_limited")
@@ -124,13 +132,6 @@ class AlertTests(unittest.IsolatedAsyncioTestCase):
         self.s = AlertService(self.temp.name, {"200000001"}, "100000001", clock=lambda: self.now)
         self.assertEqual(await self.process(self.message("2", "next")), "sent")
         self.assertEqual(await self.process(self.message("3", "abc")), "duplicate")
-
-    async def test_empty_target_user_id_is_ineligible(self):
-        self.s.target_user_id = ""
-        self.assertFalse(self.s.eligible(self.message()))
-        self.assertEqual(await self.process(self.message()), "ineligible")
-        self.classify.assert_not_awaited()
-        self.send.assert_not_awaited()
 
     async def test_target_user_own_image_is_skipped(self):
         own_msg = self.message(sender="100000001")

@@ -252,33 +252,16 @@ class InteractionTracker:
         self._ttl = max(60.0, float(ttl_seconds))
         self._max_entries = max(32, int(max_entries))
         self._clock = clock
-        self._images_by_msg: dict[str, ImageRecord] = {}
-        self._alias_to_msg: dict[str, str] = {}
-        self._session_images: dict[str, list[ImageRecord]] = {}
+        self._images_by_msg: dict[tuple[str, str], ImageRecord] = {}
         self._replies_by_session: dict[str, list[BotReplyRecord]] = {}
-        self._lookups_by_msg: dict[str, LookupRecord] = {}
-        self._lookups_by_hash: dict[str, LookupRecord] = {}
+        self._lookups_by_msg: dict[tuple[str, str], LookupRecord] = {}
+        self._lookups_by_hash: dict[tuple[str, str], LookupRecord] = {}
 
     def _prune(self, now: float) -> None:
         cutoff = now - self._ttl
 
-        for msg_id in [k for k, v in self._images_by_msg.items() if v.recorded_at < cutoff]:
-            rec = self._images_by_msg.pop(msg_id)
-            if rec.display_msg_id and self._alias_to_msg.get(rec.display_msg_id) == msg_id:
-                self._alias_to_msg.pop(rec.display_msg_id, None)
-        while len(self._images_by_msg) > self._max_entries:
-            oldest = next(iter(self._images_by_msg))
-            rec = self._images_by_msg.pop(oldest)
-            if rec.display_msg_id and self._alias_to_msg.get(rec.display_msg_id) == oldest:
-                self._alias_to_msg.pop(rec.display_msg_id, None)
-
-        for sid in list(self._session_images):
-            kept = [r for r in self._session_images[sid] if r.recorded_at >= cutoff][-32:]
-            if kept:
-                self._session_images[sid] = kept
-            else:
-                self._session_images.pop(sid, None)
-
+        for key in [key for key, image in self._images_by_msg.items() if image.recorded_at < cutoff]:
+            del self._images_by_msg[key]
         for sid in list(self._replies_by_session):
             kept = [r for r in self._replies_by_session[sid] if r.created_at >= cutoff][-32:]
             if kept:
@@ -296,11 +279,13 @@ class InteractionTracker:
         while len(self._lookups_by_hash) > self._max_entries:
             self._lookups_by_hash.pop(next(iter(self._lookups_by_hash)))
 
-    def _canonical_msg_id(self, msg_id: str) -> str:
+    def _canonical_msg_id(self, session_id: str, msg_id: str) -> str:
         clean = str(msg_id or "").strip()
-        if not clean:
-            return ""
-        return self._alias_to_msg.get(clean, clean)
+        if not clean or (session_id, clean) in self._images_by_msg:
+            return clean
+        matches = [image.msg_id for image in self._images_by_msg.values()
+                   if image.session_id == session_id and image.display_msg_id == clean]
+        return matches[0] if len(matches) == 1 else clean
 
     def record_image_message(self, message: dict[str, Any], now: float | None = None) -> ImageRecord | None:
         if not isinstance(message, dict):
@@ -308,7 +293,7 @@ class InteractionTracker:
         msg_id = str(message.get("message_id") or "").strip()
         session_id = str(message.get("session_id") or "").strip()
         hashes = tuple(unique_image_hashes(message, limit=3, max_len=256))
-        if not msg_id or not hashes:
+        if not session_id or not msg_id or not hashes:
             return None
 
         t = self._clock() if now is None else float(now)
@@ -334,35 +319,36 @@ class InteractionTracker:
             timestamp=msg_ts,
             recorded_at=t,
         )
-        self._images_by_msg[msg_id] = rec
-        if display_id and display_id != msg_id:
-            self._alias_to_msg[display_id] = msg_id
-        if session_id:
-            bucket = [r for r in self._session_images.get(session_id, []) if r.msg_id != msg_id]
-            bucket.append(rec)
-            self._session_images[session_id] = bucket[-32:]
+        key = (session_id, msg_id)
+        self._images_by_msg.pop(key, None)
+        self._images_by_msg[key] = rec
+        if len(self._images_by_msg) > self._max_entries:
+            del self._images_by_msg[next(iter(self._images_by_msg))]
         return rec
 
-    def known_image_msg_ids(self, now: float | None = None) -> set[str]:
+    def known_image_msg_ids(self, session_id: str, now: float | None = None) -> set[str]:
         t = self._clock() if now is None else float(now)
         self._prune(t)
         ids: set[str] = set()
         for rec in self._images_by_msg.values():
+            if rec.session_id != session_id:
+                continue
             ids.add(rec.msg_id)
             if rec.display_msg_id:
                 ids.add(rec.display_msg_id)
         return ids
 
-    def resolve_hashes(self, msg_id: str, now: float | None = None) -> list[str]:
+    def resolve_hashes(self, session_id: str, msg_id: str, now: float | None = None) -> list[str]:
         t = self._clock() if now is None else float(now)
         self._prune(t)
-        canonical = self._canonical_msg_id(msg_id)
-        rec = self._images_by_msg.get(canonical)
+        canonical = self._canonical_msg_id(session_id, msg_id)
+        rec = self._images_by_msg.get((session_id, canonical))
         return list(rec.image_hashes) if rec is not None else []
 
     def mark_planner_lookup(
         self,
         *,
+        session_id: str,
         msg_id: str = "",
         image_hashes: Iterable[str] = (),
         found: bool = False,
@@ -370,10 +356,11 @@ class InteractionTracker:
     ) -> None:
         t = self._clock() if now is None else float(now)
         self._prune(t)
-        canonical = self._canonical_msg_id(msg_id)
+        rec = LookupRecord(found=bool(found), created_at=t)
+        canonical = self._canonical_msg_id(session_id, msg_id)
         if canonical:
-            prev = self._lookups_by_msg.get(canonical)
-            self._lookups_by_msg[canonical] = LookupRecord(
+            prev = self._lookups_by_msg.get((session_id, canonical))
+            self._lookups_by_msg[session_id, canonical] = LookupRecord(
                 found=bool(found or (prev and prev.found)),
                 created_at=t,
             )
@@ -381,8 +368,8 @@ class InteractionTracker:
             h = str(image_hash or "").strip()
             if not h:
                 continue
-            prev = self._lookups_by_hash.get(h)
-            self._lookups_by_hash[h] = LookupRecord(
+            prev = self._lookups_by_hash.get((session_id, h))
+            self._lookups_by_hash[session_id, h] = LookupRecord(
                 found=bool(found or (prev and prev.found)),
                 created_at=t,
             )
@@ -400,7 +387,7 @@ class InteractionTracker:
             return
         t = self._clock() if now is None else float(now)
         self._prune(t)
-        target_id = self._canonical_msg_id(reply_message_id)
+        target_id = self._canonical_msg_id(sid, reply_message_id)
         rec = BotReplyRecord(
             session_id=sid,
             reply_message_id=target_id,
@@ -423,18 +410,18 @@ class InteractionTracker:
         t = self._clock() if now is None else float(now)
         self._prune(t)
 
-        canonical = self._canonical_msg_id(msg_id)
-        img_rec = self._images_by_msg.get(canonical)
+        canonical = self._canonical_msg_id(session_id, msg_id)
+        img_rec = self._images_by_msg.get((session_id, canonical))
         sender_text = img_rec.text if img_rec is not None else ""
 
         planner_looked_up = False
         planner_found = False
-        if canonical and canonical in self._lookups_by_msg:
-            lk = self._lookups_by_msg[canonical]
+        if canonical and (session_id, canonical) in self._lookups_by_msg:
+            lk = self._lookups_by_msg[session_id, canonical]
             planner_looked_up = True
             planner_found = planner_found or lk.found
         for image_hash in image_hashes:
-            lk = self._lookups_by_hash.get(str(image_hash or "").strip())
+            lk = self._lookups_by_hash.get((session_id, str(image_hash or "").strip()))
             if lk is not None:
                 planner_looked_up = True
                 planner_found = planner_found or lk.found
@@ -452,8 +439,8 @@ class InteractionTracker:
             anchor = img_rec.recorded_at if img_rec is not None else float(message_ts)
             newer_images = [
                 r
-                for r in self._session_images.get(str(session_id or "").strip(), [])
-                if r.msg_id != canonical and r.recorded_at > anchor
+                for r in self._images_by_msg.values()
+                if r.session_id == session_id and r.msg_id != canonical and r.recorded_at > anchor
             ]
             other_image_ids = {r.msg_id for r in newer_images}
             for reply in reversed(replies):

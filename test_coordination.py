@@ -115,15 +115,28 @@ class TrackerAndDecisionTests(unittest.TestCase):
         state_30 = tracker.inspect(session_id="s1", msg_id="30", image_hashes=["h30"], message_ts=1020.0, now=1026.0)
         self.assertFalse(state_30.bot_replied)
 
+    def test_message_ids_aliases_and_lookup_status_stay_in_their_session(self):
+        tracker = coord.InteractionTracker(clock=lambda: 1000.0)
+        mid = "same-long-message-id"
+        tracker.record_image_message(dict(self._msg(mid, "first", ts=1000), session_id="s1"))
+        tracker.record_image_message(dict(self._msg(mid, "second", ts=1000), session_id="s2"))
+        alias = coord.to_display_message_id(mid)
+        self.assertEqual(tracker.resolve_hashes("s1", alias), ["first"])
+        self.assertEqual(tracker.resolve_hashes("s2", mid), ["second"])
+        self.assertEqual(tracker.resolve_hashes("s3", alias), [])
+        tracker.mark_planner_lookup(session_id="s1", msg_id=alias, image_hashes=["shared"], found=True)
+        state = tracker.inspect(session_id="s2", msg_id=mid, image_hashes=["shared"], message_ts=1000)
+        self.assertFalse(state.planner_looked_up)
+
     def test_long_message_id_alias_resolution(self):
         long_id = "ROBOT1.0_very_long_message_id_123456"
         alias = coord.to_display_message_id(long_id)
         self.assertTrue(alias.startswith("m") and len(alias) == 7)
         tracker = coord.InteractionTracker(clock=lambda: 1000.0)
         tracker.record_image_message(self._msg(long_id, "hlong", ts=1000.0), now=1000.0)
-        self.assertIn(alias, tracker.known_image_msg_ids(now=1001.0))
-        self.assertEqual(tracker.resolve_hashes(alias, now=1001.0), ["hlong"])
-        tracker.mark_planner_lookup(msg_id=alias, image_hashes=["hlong"], found=True, now=1002.0)
+        self.assertIn(alias, tracker.known_image_msg_ids("s1", now=1001.0))
+        self.assertEqual(tracker.resolve_hashes("s1", alias, now=1001.0), ["hlong"])
+        tracker.mark_planner_lookup(session_id="s1", msg_id=alias, image_hashes=["hlong"], found=True, now=1002.0)
         tracker.record_bot_reply("s1", alias, "https://www.pixiv.net/artworks/1", now=1003.0)
         state = tracker.inspect(session_id="s1", msg_id=long_id, image_hashes=["hlong"], message_ts=1000.0, now=1004.0)
         self.assertTrue(state.planner_looked_up)

@@ -281,6 +281,19 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(ctx.llm.generate.call_args.kwargs["prompt"][1]["content"])
         self.assertEqual(payload["verified_source"], {"work": "绝区零", "characters": ["爱芮"]})
 
+    async def test_final_text_is_bounded_and_deduplicated_after_source_prefix(self):
+        source = {"work": "长" * 30, "characters": []}
+        out = await wording.compose_reminder(message("abc"), context(response=source["work"] * 3), source=source)
+        self.assertIn(source["work"], out)
+        self.assertLessEqual(len(out), 80)
+        ctx = context(response=RESPONSE)
+        first = await wording.compose_reminder(message("abc"), ctx, source=source)
+        second = await wording.compose_reminder(message("abc"), ctx, source=source, recent_reminders=[first])
+        self.assertIn(source["work"], second)
+        self.assertNotEqual(second, first)
+        invalid_source = await wording.compose_reminder(message("abc"), context(), source={"work": "bad\nname"})
+        self.assertNotIn("\n", invalid_source)
+
     async def test_verified_source_mentioned_by_model_is_kept_verbatim(self):
         ctx = context(response="原神的琳妮特这张好灵，速看")
         out = await wording.compose_reminder(

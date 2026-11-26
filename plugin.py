@@ -169,7 +169,10 @@ class AnimeImageAlertPlugin(MaiBotPlugin):
         if not isinstance(items, list) or SOURCE_TOOL_NAME not in tool_names(kwargs.get("tool_definitions") or []):
             return unchanged
 
-        target_msg_id = detect_source_inquiry(items, known_image_msg_ids=self._tracker.known_image_msg_ids())
+        session_id = str(kwargs.get("session_id") or "").strip()
+        if not session_id:
+            return unchanged
+        target_msg_id = detect_source_inquiry(items, known_image_msg_ids=self._tracker.known_image_msg_ids(session_id))
         if not target_msg_id:
             return unchanged
 
@@ -257,17 +260,18 @@ class AnimeImageAlertPlugin(MaiBotPlugin):
         """Reverse-search the first resolvable image; never raises."""
         return await self._lookup_source_by_hashes([seg["hash"] for seg in image_segments(message)])
 
-    async def _resolve_hashes_for_msg_id(self, msg_id: str) -> list[str]:
-        hashes = self._tracker.resolve_hashes(msg_id)
+    async def _resolve_hashes_for_msg_id(self, session_id: str, msg_id: str) -> list[str]:
+        hashes = self._tracker.resolve_hashes(session_id, msg_id)
         if hashes or not hasattr(self.ctx, "db"):
             return hashes
         try:
             record = await self.ctx.db.get(
                 "Messages",
-                filters={"platform": "qq", "message_id": msg_id},
+                filters={"platform": "qq", "session_id": session_id, "message_id": msg_id},
                 single_result=True,
             )
-            if isinstance(record, dict):
+            if (isinstance(record, dict) and record.get("session_id") == session_id
+                    and record.get("message_id") == msg_id and record.get("platform") == "qq"):
                 raw_content = record.get("raw_content")
                 if isinstance(raw_content, (bytes, bytearray)):
                     import msgpack
@@ -304,7 +308,7 @@ class AnimeImageAlertPlugin(MaiBotPlugin):
         ],
         visibility="visible",
     )
-    async def tool_lookup_image_source(self, msg_id: Any = "", index: Any = 0, **kwargs: Any) -> dict[str, Any]:
+    async def tool_lookup_image_source(self, msg_id: Any = "", index: Any = 0, stream_id: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
         if (
             not self._running
@@ -315,6 +319,9 @@ class AnimeImageAlertPlugin(MaiBotPlugin):
         ):
             return {"success": False, "error": "以图搜图功能当前未启用"}
 
+        session_id = str(stream_id or "").strip()
+        if not session_id:
+            return {"success": False, "error": "无法确认当前会话，已跳过搜图"}
         norm_msg_id = str(msg_id or "").strip()
         if not norm_msg_id:
             return {"success": False, "error": "请提供包含图片的消息 msg_id"}
@@ -323,9 +330,9 @@ class AnimeImageAlertPlugin(MaiBotPlugin):
         except (TypeError, ValueError):
             norm_idx = 0
 
-        hashes = await self._resolve_hashes_for_msg_id(norm_msg_id)
+        hashes = await self._resolve_hashes_for_msg_id(session_id, norm_msg_id)
         if not hashes:
-            self._tracker.mark_planner_lookup(msg_id=norm_msg_id, found=False)
+            self._tracker.mark_planner_lookup(session_id=session_id, msg_id=norm_msg_id, found=False)
             return {
                 "success": True,
                 "found": False,
@@ -340,7 +347,7 @@ class AnimeImageAlertPlugin(MaiBotPlugin):
 
         target_hash = hashes[norm_idx]
         source = await self._lookup_source_by_hashes([target_hash])
-        self._tracker.mark_planner_lookup(msg_id=norm_msg_id, image_hashes=[target_hash], found=source is not None)
+        self._tracker.mark_planner_lookup(session_id=session_id, msg_id=norm_msg_id, image_hashes=[target_hash], found=source is not None)
         if source is None:
             return {
                 "success": True,
